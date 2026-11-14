@@ -2337,9 +2337,10 @@ R.sanctum.win = g => {
 
 /* ============================================================
    LAST ORDERS : pictures (toolkit from Golden Knob)
-   Every scene is painted at 320x180, then cut to a 64-colour
-   Extra Half-Brite palette (32 colours + 32 half-bright) with
-   an ordered dither, the way an Amiga would have shown it.
+   Every scene is laid out on a 320x180 grid but painted at double
+   that (640x360, Amiga hi-res), then cut to 64 colours picked for
+   that picture, with an ordered dither. Characters and props get a
+   dark outline so they stand out from the background.
    ============================================================ */
 (() => {
 const W = 320, H = 180;
@@ -2349,8 +2350,39 @@ const PAL = [];
 BASE.forEach(h => { const v = [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4), 16)]; PAL.push(v); PAL.push(v.map(x => x >> 1)); });
 const BAYER = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
-const src = document.createElement('canvas'); src.width = W; src.height = H;
-const c = src.getContext('2d');
+const SCALE = 2, RW = W * SCALE, RH = H * SCALE;
+const FIG = 1.3;   // people are drawn this much bigger than the layout numbers
+const mk = () => { const cv = document.createElement('canvas'); cv.width = RW; cv.height = RH; return cv; };
+const src = mk(), layCv = mk(), silCv = mk();
+const baseCtx = src.getContext('2d', { willReadFrequently: true });
+const layCtx = layCv.getContext('2d', { willReadFrequently: true }), silCtx = silCv.getContext('2d');
+let c = baseCtx;   // where the toolkit is drawing right now (the picture, or a character layer)
+
+/* Draw something on its own layer, then stamp it onto the picture with a dark outline. */
+const OUTLINE = [20, 12, 26];
+function outlined(fn) {
+  if (c !== baseCtx) return fn();          // already inside a layer: just draw
+  const tf = baseCtx.getTransform();
+  layCtx.setTransform(1, 0, 0, 1, 0, 0); layCtx.globalAlpha = 1; layCtx.clearRect(0, 0, RW, RH);
+  layCtx.setTransform(tf);
+  c = layCtx;
+  try { fn(); } finally { c = baseCtx; }
+  // solid silhouette of everything that is properly opaque (so glows and shadows get no outline)
+  const img = layCtx.getImageData(0, 0, RW, RH), d = img.data;
+  let x0 = RW, y0 = RH, x1 = -1, y1 = -1;
+  for (let y = 0, i = 3; y < RH; y++) for (let x = 0; x < RW; x++, i += 4) {
+    if (d[i] > 170) { d[i - 3] = OUTLINE[0]; d[i - 2] = OUTLINE[1]; d[i - 1] = OUTLINE[2]; d[i] = 255; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    else d[i] = 0;
+  }
+  baseCtx.save(); baseCtx.setTransform(1, 0, 0, 1, 0, 0); baseCtx.globalAlpha = 1;
+  if (x1 >= 0) {
+    silCtx.clearRect(0, 0, RW, RH); silCtx.putImageData(img, 0, 0);
+    const bx = Math.max(0, x0 - 2), by = Math.max(0, y0 - 2), bw = Math.min(RW, x1 + 3) - bx, bh = Math.min(RH, y1 + 3) - by;
+    for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, -1], [-1, 1], [1, 1], [0, 2]]) baseCtx.drawImage(silCv, bx, by, bw, bh, bx + dx, by + dy, bw, bh);
+  }
+  baseCtx.drawImage(layCv, 0, 0);
+  baseCtx.restore();
+}
 let seed = 1;
 const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
 const hex2 = h => { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; };
@@ -2358,7 +2390,7 @@ const shade = (h, d) => { const [r, g, b] = hex2(h), f = v => Math.max(0, Math.m
 
 /* ---------------- toolkit ---------------- */
 const T = {
-  c, W, H, rnd, shade,
+  get c() { return c; }, W, H, rnd, shade, outlined,
   seed(n) { seed = n; },
   rect(x, y, w, h, f) { c.fillStyle = f; c.fillRect(x, y, w, h); },
   poly(pts, f) { c.beginPath(); pts.forEach(([a, b], i) => i ? c.lineTo(a, b) : c.moveTo(a, b)); c.closePath(); c.fillStyle = f; c.fill(); },
@@ -2461,89 +2493,124 @@ const T = {
   coins(x0, y0, w, h, n) { for (let i = 0; i < n; i++) { const x = x0 + rnd() * w, y = y0 + rnd() * h; T.ell(x, y, 2, 1.2, '#f8d040'); T.rect(x - 1, y - 1, 1, 1, '#fff4a0'); } },
 
   /* a person, feet at (x, y). Mostly first-person views, so these are the people you meet. */
-  fig(x, y, o) {
-    const h = o.h || 50, s = h / 50, b = o.bulk || 1;
+  fig(x, y, o) { outlined(() => T.figRaw(x, y, o)); },
+  figRaw(x, y, o) {
+    // a person, feet at (x, y). Drawn about a third bigger than the layout numbers say (o.fixed turns that off).
+    const h = (o.h || 50) * (o.fixed ? 1 : FIG), s = h / 50, b = o.bulk || 1;
+    const hexOK = v => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
+    const sh = (v, d) => hexOK(v) ? shade(v, d) : v;
     const skin = o.skin || '#f4cca4', top = o.top || '#a42c1c', sleeve = o.sleeve || top;
     const sw = 15 * s * b, ww = 12 * s * b, hw = (o.robe ? 18 : 16) * s * b;
     const yT = y - 34 * s, yW = y - 19 * s, yH = o.robe ? y - 1 * s : y - 14 * s;
     const hy = yT - 8 * s, hr = 5 * s * (o.head || 1);
-    const S = 'rgba(0,0,0,.24)';
-    if (o.cape) T.poly([[x - sw / 2 - 1, yT], [x + sw / 2 + 1, yT], [x + hw / 2 + 4, y - 3 * s], [x - hw / 2 - 4, y - 3 * s]], o.cape);
-    if (o.hairStyle === 'long' || o.hairStyle === 'braids') T.rect(x - hr * 1.15, hy - hr * .6, hr * 2.3, hr * 2.2, o.hair);
+    const S = 'rgba(0,0,0,.22)';
+    const px = Math.max(.5, s * .5);
+    if (!o.noShadow) T.ell(x + 1.5 * s, y + .5 * s, 10 * s * b, 2.2 * s, 'rgba(10,10,40,.3)');
+    if (o.cape) { T.poly([[x - sw / 2 - 1, yT], [x + sw / 2 + 1, yT], [x + hw / 2 + 4, y - 3 * s], [x - hw / 2 - 4, y - 3 * s]], o.cape); T.poly([[x + 2, yT], [x + sw / 2 + 1, yT], [x + hw / 2 + 4, y - 3 * s], [x + 3, y - 3 * s]], S); }
+    if (o.hairStyle === 'long' || o.hairStyle === 'braids') T.rect(x - hr * 1.15, hy - hr * .6, hr * 2.3, hr * 2.2, sh(o.hair, -18));
     if (!o.robe) {
-      const lw = 4.5 * s * b, lc = o.legs || skin;
-      T.rect(x - 5.5 * s * b, yH - 1, lw, y - yH, lc); T.rect(x + 1 * s * b, yH - 1, lw, y - yH, lc);
-      T.rect(x + 1 * s * b + lw * .55, yH, lw * .45, y - yH, S);
-      T.rect(x - 7 * s * b, y - 2 * s, 6 * s * b, 2.5 * s, o.feet || '#6e4422'); T.rect(x + 1 * s * b, y - 2 * s, 6 * s * b, 2.5 * s, o.feet || '#6e4422');
+      const lw = 4.8 * s * b, lc = o.legs || skin;
+      for (const lx of [x - 5.7 * s * b, x + .9 * s * b]) {
+        T.rect(lx, yH - 1, lw, y - yH, lc);
+        T.rect(lx + lw * .6, yH - 1, lw * .4, y - yH, S);
+        T.rect(lx, yH - 1, lw * .22, y - yH, 'rgba(255,255,255,.12)');
+      }
+      const fc = o.feet || '#6e4422';
+      for (const fx of [x - 7.2 * s * b, x + .8 * s * b]) { T.ell(fx + 3.2 * s * b, y - 1.2 * s, 3.6 * s * b, 1.7 * s, fc); T.rect(fx + .6 * s * b, y - 2.6 * s, 4 * s * b, px, 'rgba(255,255,255,.25)'); }
     }
-    T.poly([[x - sw / 2, yT], [x + sw / 2, yT], [x + hw / 2, yH], [x - hw / 2, yH]], top);
-    T.poly([[x + 1, yT], [x + sw / 2, yT], [x + hw / 2, yH], [x + 1, yH]], S);
-    if (o.toga) T.poly([[x - sw / 2, yT], [x - sw / 2 + 4 * s, yT], [x + hw / 2, yH - 4 * s], [x + hw / 2 - 3 * s, yH]], o.toga);
+    // body, lit from the left
+    T.poly([[x - sw / 2, yT], [x + sw / 2, yT], [x + hw / 2, yH], [x - hw / 2, yH]], hexOK(top) ? T.lin(x - hw / 2, 0, x + hw / 2, 0, [shade(top, 22), top, shade(top, -34)]) : top);
+    T.poly([[x - sw / 2, yT], [x + sw / 2, yT], [x + sw / 2 - s, yT + 2.2 * s], [x - sw / 2 + s, yT + 2.2 * s]], 'rgba(255,255,255,.14)');
+    if (o.robe) for (let i = -1; i <= 1; i++) T.line(x + i * hw * .22, yW + 2 * s, x + i * hw * .3, yH - s, 'rgba(0,0,0,.16)', px);
+    if (o.toga) { T.poly([[x - sw / 2, yT], [x - sw / 2 + 4 * s, yT], [x + hw / 2, yH - 4 * s], [x + hw / 2 - 3 * s, yH]], o.toga); T.line(x - sw / 2 + 4 * s, yT, x + hw / 2, yH - 4 * s, 'rgba(0,0,0,.25)', px); }
     if (o.trim) T.rect(x - hw / 2, yH - 2 * s, hw, 2 * s, o.trim);
-    if (o.belt) T.rect(x - ww / 2 - 1, yW, ww + 2, 2.2 * s, o.belt);
+    if (o.belt) { T.rect(x - ww / 2 - 1, yW, ww + 2, 2.2 * s, o.belt); T.rect(x - 1.3 * s, yW - .2 * s, 2.6 * s, 2.6 * s, '#f8d040'); T.rect(x - .6 * s, yW + .5 * s, 1.2 * s, 1.2 * s, o.belt); }
     if (o.stars) for (let i = 0; i < 6; i++) T.rect(x - hw / 2 + rnd() * hw, yT + 4 + rnd() * (yH - yT - 6), 1, 1, o.stars);
     // arms
-    const aw = 3.6 * s * b, ax = sw / 2 + aw / 2 - 1;
-    const hand = (hx, hy2) => T.circ(hx, hy2, 2 * s * b, skin);
+    const aw = 3.8 * s * b, ax = sw / 2 + aw / 2 - 1;
+    const dark = sh(sleeve, -28);
+    const hand = (hx, hy2) => { T.circ(hx, hy2, 2.1 * s * b, skin); T.circ(hx + .6 * s, hy2 + .5 * s, 1.2 * s * b, sh(skin, -22)); };
     const arms = o.arms || 'down';
-    if (arms === 'down') { T.rect(x - ax - aw / 2, yT + 1, aw, 15 * s, sleeve); T.rect(x + ax - aw / 2, yT + 1, aw, 15 * s, shade(sleeve.startsWith('#') ? sleeve : '#888888', -25)); hand(x - ax, yT + 17 * s); hand(x + ax, yT + 17 * s); }
-    if (arms === 'hips') { T.poly([[x - sw / 2, yT + 1], [x - sw / 2 - 5 * s, yT + 9 * s], [x - ww / 2, yW], [x - ww / 2 + 2, yW - 2], [x - sw / 2 - 1, yT + 9 * s], [x - sw / 2 + 2, yT + 1]], sleeve); T.poly([[x + sw / 2, yT + 1], [x + sw / 2 + 5 * s, yT + 9 * s], [x + ww / 2, yW], [x + ww / 2 - 2, yW - 2], [x + sw / 2 + 1, yT + 9 * s], [x + sw / 2 - 2, yT + 1]], sleeve); hand(x - ww / 2, yW); hand(x + ww / 2, yW); }
+    if (arms === 'down') { T.rect(x - ax - aw / 2, yT + 1, aw, 15 * s, sleeve); T.rect(x - ax - aw / 2, yT + 1, aw * .3, 15 * s, 'rgba(255,255,255,.14)'); T.rect(x + ax - aw / 2, yT + 1, aw, 15 * s, dark); hand(x - ax, yT + 17 * s); hand(x + ax, yT + 17 * s); }
+    if (arms === 'hips') { T.poly([[x - sw / 2, yT + 1], [x - sw / 2 - 5 * s, yT + 9 * s], [x - ww / 2, yW], [x - ww / 2 + 2, yW - 2], [x - sw / 2 - 1, yT + 9 * s], [x - sw / 2 + 2, yT + 1]], sleeve); T.poly([[x + sw / 2, yT + 1], [x + sw / 2 + 5 * s, yT + 9 * s], [x + ww / 2, yW], [x + ww / 2 - 2, yW - 2], [x + sw / 2 + 1, yT + 9 * s], [x + sw / 2 - 2, yT + 1]], dark); hand(x - ww / 2, yW); hand(x + ww / 2, yW); }
     if (arms === 'rub' || arms === 'cup' || arms === 'fold') {
-      T.rect(x - ax - aw / 2, yT + 1, aw, 9 * s, sleeve); T.rect(x + ax - aw / 2, yT + 1, aw, 9 * s, sleeve);
-      if (arms === 'fold') { T.rect(x - sw / 2, yT + 8 * s, sw, 4 * s, shade(sleeve.startsWith('#') ? sleeve : '#888888', -15)); }
-      else { T.line(x - ax, yT + 9 * s, x - 1.5 * s, yT + 12 * s, sleeve, aw); T.line(x + ax, yT + 9 * s, x + 1.5 * s, yT + 12 * s, sleeve, aw); hand(x - 1.5 * s, yT + 12.5 * s); hand(x + 1.5 * s, yT + 12.5 * s); }
-      if (arms === 'cup') { T.rect(x + 1 * s, yT + 8.5 * s, 4 * s, 3 * s, '#ffffff'); T.rect(x + 1.5 * s, yT + 8.5 * s, 3 * s, 1, '#6e4422'); }
+      T.rect(x - ax - aw / 2, yT + 1, aw, 9 * s, sleeve); T.rect(x + ax - aw / 2, yT + 1, aw, 9 * s, dark);
+      if (arms === 'fold') { T.rect(x - sw / 2, yT + 8 * s, sw, 4 * s, sh(sleeve, -15)); T.rect(x - sw / 2, yT + 8 * s, sw, px, 'rgba(255,255,255,.2)'); hand(x - sw / 2 + 1.5 * s, yT + 10 * s); hand(x + sw / 2 - 1.5 * s, yT + 10 * s); }
+      else { T.line(x - ax, yT + 9 * s, x - 1.5 * s, yT + 12 * s, sleeve, aw); T.line(x + ax, yT + 9 * s, x + 1.5 * s, yT + 12 * s, dark, aw); hand(x - 1.5 * s, yT + 12.5 * s); hand(x + 1.5 * s, yT + 12.5 * s); }
+      if (arms === 'cup') { T.rect(x + 1 * s, yT + 8.5 * s, 4 * s, 3.4 * s, '#d0c8ba'); T.rect(x + 1 * s, yT + 8.5 * s, 4 * s, px * 1.5, '#ffffff'); T.rect(x + 5 * s, yT + 9.2 * s, 1.2 * s, 2 * s, '#a09a90'); }
     }
-    if (arms === 'up') { T.line(x - ax, yT + 2, x - ax - 5 * s, yT - 14 * s, sleeve, aw); T.line(x + ax, yT + 2, x + ax + 5 * s, yT - 14 * s, sleeve, aw); hand(x - ax - 5 * s, yT - 15 * s); hand(x + ax + 5 * s, yT - 15 * s); }
-    if (arms === 'wave') { T.rect(x - ax - aw / 2, yT + 1, aw, 15 * s, sleeve); hand(x - ax, yT + 17 * s); T.line(x + ax, yT + 2, x + ax + 5 * s, yT - 10 * s, sleeve, aw); hand(x + ax + 5 * s, yT - 11 * s); }
+    if (arms === 'up') { T.line(x - ax, yT + 2, x - ax - 5 * s, yT - 14 * s, sleeve, aw); T.line(x + ax, yT + 2, x + ax + 5 * s, yT - 14 * s, dark, aw); hand(x - ax - 5 * s, yT - 15 * s); hand(x + ax + 5 * s, yT - 15 * s); }
+    if (arms === 'wave') { T.rect(x - ax - aw / 2, yT + 1, aw, 15 * s, sleeve); hand(x - ax, yT + 17 * s); T.line(x + ax, yT + 2, x + ax + 5 * s, yT - 10 * s, dark, aw); hand(x + ax + 5 * s, yT - 11 * s); }
     // neck + head
-    T.rect(x - 2 * s, yT - 3 * s, 4 * s, 4 * s, skin);
-    if (o.ears) { T.poly([[x - hr + 1, hy - 1], [x - hr - 6 * s, hy - 6 * s], [x - hr + 1, hy + 2]], skin); T.poly([[x + hr - 1, hy - 1], [x + hr + 6 * s, hy - 6 * s], [x + hr - 1, hy + 2]], skin); }
-    T.ell(x, hy, hr, hr * 1.15, skin);
-    T.ell(x + hr * .45, hy + 1, hr * .5, hr * 1, 'rgba(0,0,0,.12)');
-    const hs = o.hairStyle;
-    if (hs === 'short' || hs === 'long' || hs === 'braids' || hs === 'slick' || hs === 'grey') T.ell(x, hy - hr * .55, hr * 1.08, hr * .7, o.hair);
-    if (hs === 'slick') T.rect(x - 1, hy - hr * 1.2, 1, hr * .6, shade(o.hair, -30));
-    if (hs === 'spiky') for (let i = -2; i <= 2; i++) T.poly([[x + i * hr * .4 - 2, hy - hr * .5], [x + i * hr * .45, hy - hr * 1.5], [x + i * hr * .4 + 2, hy - hr * .5]], o.hair);
-    if (hs === 'spiky') T.ell(x, hy - hr * .55, hr * 1.02, hr * .55, o.hair);
-    if (hs === 'long') { T.rect(x - hr * 1.15, hy - hr * .5, hr * .55, hr * 2.5, o.hair); T.rect(x + hr * .6, hy - hr * .5, hr * .55, hr * 2.5, o.hair); }
-    if (hs === 'braids') for (const sx of [-1, 1]) for (let k = 0; k < 7; k++) T.ell(x + sx * hr * 1.05, hy + k * 3 * s, 1.8 * s, 1.8 * s, k % 2 ? o.hair : shade(o.hair, -35));
-    if (hs === 'bald') T.ell(x - hr * .35, hy - hr * .6, hr * .3, hr * .2, 'rgba(255,255,255,.55)');
-    if (o.bow) { T.ell(x - 3 * s, hy - hr * 1.1, 3 * s, 2 * s, o.bow); T.ell(x + 3 * s, hy - hr * 1.1, 3 * s, 2 * s, o.bow); T.circ(x, hy - hr * 1.1, 1.3 * s, shade(o.bow, -40)); }
+    T.rect(x - 2 * s, yT - 3 * s, 4 * s, 4 * s, sh(skin, -18));
+    if (o.ears) { T.poly([[x - hr + 1, hy - 1], [x - hr - 6 * s, hy - 6 * s], [x - hr + 1, hy + 2]], skin); T.poly([[x + hr - 1, hy - 1], [x + hr + 6 * s, hy - 6 * s], [x + hr - 1, hy + 2]], sh(skin, -20)); }
+    else { T.ell(x - hr * .98, hy + hr * .1, hr * .22, hr * .32, sh(skin, -10)); T.ell(x + hr * .98, hy + hr * .1, hr * .22, hr * .32, sh(skin, -30)); }
+    T.ell(x, hy, hr, hr * 1.15, hexOK(skin) ? T.lin(x - hr, 0, x + hr, 0, [shade(skin, 14), skin, shade(skin, -30)]) : skin);
+    const hs = o.hairStyle, hc = o.hair, hl = sh(hc, 34);
+    if (hs === 'short' || hs === 'long' || hs === 'braids' || hs === 'slick' || hs === 'grey') { T.ell(x, hy - hr * .55, hr * 1.08, hr * .7, hc); T.ell(x - hr * .35, hy - hr * .8, hr * .45, hr * .22, hl); }
+    if (hs === 'slick') T.rect(x - 1, hy - hr * 1.2, 1, hr * .6, sh(hc, -30));
+    if (hs === 'spiky') { for (let i = -2; i <= 2; i++) T.poly([[x + i * hr * .4 - 2, hy - hr * .5], [x + i * hr * .45, hy - hr * 1.5], [x + i * hr * .4 + 2, hy - hr * .5]], hc); T.ell(x, hy - hr * .55, hr * 1.02, hr * .55, hc); }
+    if (hs === 'long') { T.rect(x - hr * 1.15, hy - hr * .5, hr * .55, hr * 2.5, hc); T.rect(x + hr * .6, hy - hr * .5, hr * .55, hr * 2.5, sh(hc, -20)); T.rect(x - hr * 1.05, hy - hr * .4, px, hr * 2.2, hl); }
+    if (hs === 'braids') for (const sx of [-1, 1]) for (let k = 0; k < 7; k++) T.ell(x + sx * hr * 1.05, hy + k * 3 * s, 1.8 * s, 1.8 * s, k % 2 ? hc : sh(hc, -35));
+    if (hs === 'bald' || !hs) T.ell(x - hr * .35, hy - hr * .62, hr * .32, hr * .18, 'rgba(255,255,255,.5)');
+    if (o.bow) { T.ell(x - 3 * s, hy - hr * 1.1, 3 * s, 2 * s, o.bow); T.ell(x + 3 * s, hy - hr * 1.1, 3 * s, 2 * s, o.bow); T.circ(x, hy - hr * 1.1, 1.3 * s, sh(o.bow, -40)); }
     // face
-    const ey = hy - hr * .1;
-    T.rect(x - 2.2 * s, ey, Math.max(1, s), Math.max(1, s), '#000000'); T.rect(x + 1.4 * s, ey, Math.max(1, s), Math.max(1, s), '#000000');
-    if (o.brows === 'angry') { T.line(x - 3 * s, ey - 2 * s, x - .5 * s, ey - .8 * s, '#3c3a38', Math.max(1, s)); T.line(x + 3 * s, ey - 2 * s, x + .5 * s, ey - .8 * s, '#3c3a38', Math.max(1, s)); }
-    if (o.beard === 'viking') T.poly([[x - hr, hy + hr * .1], [x + hr, hy + hr * .1], [x + hr * .8, hy + hr * 2.4], [x, hy + hr * 3], [x - hr * .8, hy + hr * 2.4]], o.beardCol || o.hair);
-    if (o.beard === 'viking') T.rect(x - 1.5 * s, hy + hr * .5, 3 * s, 1, shade(o.beardCol || o.hair, -40));
-    if (o.beard === 'tache') { T.rect(x - 3 * s, hy + hr * .45, 6 * s, 1.4 * s, o.beardCol || o.hair); }
-    if (o.beard === 'ginger') T.poly([[x - hr, hy + hr * .1], [x + hr, hy + hr * .1], [x + hr * .6, hy + hr * 2], [x - hr * .6, hy + hr * 2]], '#dc4c30');
-    if (o.lips) T.rect(x - 2 * s, hy + hr * .65, 4 * s, 1.5 * s, o.lips);
-    else if (!o.beard || o.beard === 'tache') T.rect(x - 1.2 * s, hy + hr * .75, 2.4 * s, Math.max(1, s * .6), o.mouth || '#6e4422');
+    const ey = hy - hr * .02, ex = hr * .42;
+    const dk = hexOK(skin) && hex2(skin)[0] + hex2(skin)[1] + hex2(skin)[2] < 300;   // dark-skinned (trolls): light eyes
+    for (const d of [-1, 1]) { T.ell(x + d * ex, ey, hr * .24, hr * .2, '#ffffff'); T.circ(x + d * ex + hr * .05, ey + hr * .02, hr * .12, dk ? '#1c3c8c' : '#1c1a18'); }
+    const bc = hc && hs && hs !== 'bald' ? sh(hc, -40) : '#3c3a38';
+    if (o.brows === 'angry') { T.line(x - ex - hr * .3, ey - hr * .48, x - ex + hr * .28, ey - hr * .22, bc, Math.max(.8, s * .7)); T.line(x + ex + hr * .3, ey - hr * .48, x + ex - hr * .28, ey - hr * .22, bc, Math.max(.8, s * .7)); }
+    else { T.line(x - ex - hr * .26, ey - hr * .36, x - ex + hr * .26, ey - hr * .4, bc, Math.max(.6, s * .5)); T.line(x + ex - hr * .26, ey - hr * .4, x + ex + hr * .26, ey - hr * .36, bc, Math.max(.6, s * .5)); }
+    T.line(x + hr * .04, ey + hr * .12, x + hr * .1, ey + hr * .42, sh(skin, -40), Math.max(.6, s * .45));
+    T.ell(x - hr * .55, ey + hr * .42, hr * .2, hr * .13, 'rgba(230,110,110,.28)'); T.ell(x + hr * .55, ey + hr * .42, hr * .2, hr * .13, 'rgba(230,110,110,.2)');
+    const bdc = o.beardCol || o.hair;
+    if (o.beard === 'viking') { T.poly([[x - hr, hy + hr * .25], [x + hr, hy + hr * .25], [x + hr * .8, hy + hr * 2.4], [x, hy + hr * 3], [x - hr * .8, hy + hr * 2.4]], bdc); T.poly([[x + hr * .2, hy + hr * .25], [x + hr, hy + hr * .25], [x + hr * .8, hy + hr * 2.4], [x + hr * .1, hy + hr * 2.95]], 'rgba(0,0,0,.16)'); for (let i = -1; i <= 1; i++) T.line(x + i * hr * .4, hy + hr * .9, x + i * hr * .3, hy + hr * 2.3, sh(bdc, 30), px); T.ell(x, hy + hr * .62, hr * .34, hr * .14, sh(bdc, -50)); }
+    if (o.beard === 'tache') { T.ell(x - hr * .28, hy + hr * .56, hr * .34, hr * .14, bdc); T.ell(x + hr * .28, hy + hr * .56, hr * .34, hr * .14, bdc); }
+    if (o.beard === 'ginger') T.poly([[x - hr, hy + hr * .25], [x + hr, hy + hr * .25], [x + hr * .6, hy + hr * 2], [x - hr * .6, hy + hr * 2]], '#dc4c30');
+    if (o.lips) { T.ell(x, hy + hr * .72, hr * .34, hr * .15, o.lips); }
+    else if (!o.beard || o.beard === 'tache') { if (o.mouth) T.rect(x - 1.2 * s, hy + hr * .75, 2.4 * s, Math.max(1, s * .6), o.mouth); else T.curve(x - hr * .3, hy + hr * .72, x, hy + hr * (o.brows === 'angry' ? .62 : .9), x + hr * .3, hy + hr * .72, '#6e3422', Math.max(.7, s * .5)); }
     if (o.helmet === 'horned') {
-      T.ell(x, hy - hr * .5, hr * 1.1, hr * .8, '#a09a90'); T.rect(x - hr * 1.1, hy - hr * .3, hr * 2.2, 2 * s, '#6c6862');
+      T.ell(x, hy - hr * .5, hr * 1.1, hr * .8, '#a09a90'); T.ell(x - hr * .4, hy - hr * .8, hr * .4, hr * .2, '#e4f4ff'); T.rect(x - hr * 1.1, hy - hr * .3, hr * 2.2, 2 * s, '#6c6862');
       T.poly([[x - hr, hy - hr * .5], [x - hr - 6 * s, hy - hr * 2.2], [x - hr - 2 * s, hy - hr * .8]], '#f0e6d0');
-      T.poly([[x + hr, hy - hr * .5], [x + hr + 6 * s, hy - hr * 2.2], [x + hr + 2 * s, hy - hr * .8]], '#f0e6d0');
+      T.poly([[x + hr, hy - hr * .5], [x + hr + 6 * s, hy - hr * 2.2], [x + hr + 2 * s, hy - hr * .8]], '#d0c8ba');
     }
     if (o.after) o.after(x, y, s, hy, hr, yT);
   }
 };
 
 /* ---------------- colour reduction ---------------- */
-function quantize(ctx, spread = 22) {
-  const img = c.getImageData(0, 0, W, H), d = img.data;
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const i = (y * W + x) * 4, t = (BAYER[y & 3][x & 3] / 16 - .47) * spread;
-    const r = d[i] + t, g = d[i + 1] + t, b = d[i + 2] + t;
-    let best = 0, bd = 1e9;
-    for (let k = 0; k < PAL.length; k++) {
-      const p = PAL[k], dr = r - p[0], dg = g - p[1], db = b - p[2];
-      const dist = dr * dr * 3 + dg * dg * 4 + db * db * 2;
-      if (dist < bd) { bd = dist; best = k; }
+function quantize(ctx, spread = 14) {
+  const img = baseCtx.getImageData(0, 0, RW, RH), d = img.data;
+  const pal = medianCut(d, 64), cache = new Map();
+  for (let y = 0; y < RH; y++) for (let x = 0; x < RW; x++) {
+    const i = (y * RW + x) * 4, t = (BAYER[y & 3][x & 3] / 16 - .47) * spread;
+    const r = Math.max(0, Math.min(255, d[i] + t)) | 0, g = Math.max(0, Math.min(255, d[i + 1] + t)) | 0, b = Math.max(0, Math.min(255, d[i + 2] + t)) | 0;
+    const key = (r >> 2 << 12) | (g >> 2 << 6) | (b >> 2);
+    let best = cache.get(key);
+    if (best === undefined) {
+      let bd = 1e9; best = 0;
+      for (let k = 0; k < pal.length; k++) { const p = pal[k], dr = r - p[0], dg = g - p[1], db = b - p[2], dist = dr * dr * 3 + dg * dg * 4 + db * db * 2; if (dist < bd) { bd = dist; best = k; } }
+      cache.set(key, best);
     }
-    d[i] = PAL[best][0]; d[i + 1] = PAL[best][1]; d[i + 2] = PAL[best][2]; d[i + 3] = 255;
+    const q = pal[best]; d[i] = q[0]; d[i + 1] = q[1]; d[i + 2] = q[2]; d[i + 3] = 255;
   }
   ctx.putImageData(img, 0, 0);
+}
+/* pick n colours that suit this picture (median cut), always keeping black and white */
+function medianCut(d, n) {
+  const px = [];
+  for (let i = 0; i < d.length; i += 4 * 11) px.push([d[i], d[i + 1], d[i + 2]]);   // every 11th pixel is plenty
+  let boxes = [px];
+  while (boxes.length < n - 2) {
+    let bi = -1, bestR = -1, ch = 0;
+    boxes.forEach((b, i) => { if (b.length < 2) return; for (let k = 0; k < 3; k++) { let lo = 255, hi = 0; for (const p of b) { if (p[k] < lo) lo = p[k]; if (p[k] > hi) hi = p[k]; } const score = (hi - lo) * Math.sqrt(b.length); if (score > bestR) { bestR = score; bi = i; ch = k; } } });
+    if (bi < 0 || bestR <= 0) break;
+    const b = boxes[bi].sort((x, y) => x[ch] - y[ch]), m = b.length >> 1;
+    boxes.splice(bi, 1, b.slice(0, m), b.slice(m));
+  }
+  const pal = boxes.map(b => { const a = [0, 0, 0]; b.forEach(p => { a[0] += p[0]; a[1] += p[1]; a[2] += p[2]; }); return a.map(v => Math.round(v / b.length)); });
+  pal.push(OUTLINE.slice(), [255, 255, 255]);
+  return pal;
 }
 
 /* ---------------- shared figures ---------------- */
@@ -2679,19 +2746,6 @@ const SW = 640, SH = 360;
 const sCanvas = document.createElement('canvas'); sCanvas.width = SW; sCanvas.height = SH;
 const sc2 = sCanvas.getContext('2d', { willReadFrequently: true });
 const specialCache = {}, specialWait = {};
-function medianCut(d, n) {
-  const px = [];
-  for (let i = 0; i < d.length; i += 4 * 3) px.push([d[i], d[i + 1], d[i + 2]]);
-  let boxes = [px];
-  while (boxes.length < n) {
-    let bi = -1, bestR = -1, ch = 0;
-    boxes.forEach((b, i) => { if (b.length < 2) return; for (let k = 0; k < 3; k++) { let lo = 255, hi = 0; for (const p of b) { if (p[k] < lo) lo = p[k]; if (p[k] > hi) hi = p[k]; } if (hi - lo > bestR) { bestR = hi - lo; bi = i; ch = k; } } });
-    if (bi < 0) break;
-    const b = boxes[bi].sort((x, y) => x[ch] - y[ch]), m = b.length >> 1;
-    boxes.splice(bi, 1, b.slice(0, m), b.slice(m));
-  }
-  return boxes.map(b => { const a = [0, 0, 0]; b.forEach(p => { a[0] += p[0]; a[1] += p[1]; a[2] += p[2]; }); return a.map(v => Math.round(v / b.length)); });
-}
 function crunch(im) {
   const r = Math.max(SW / im.width, SH / im.height), w = im.width * r, h = im.height * r;
   sc2.drawImage(im, (SW - w) / 2, (SH - h) / 2, w, h);
@@ -2726,19 +2780,32 @@ function drawSpecial(name, canvas) {
 // get the pictures ready in the background so they pop up instantly later
 setTimeout(() => Object.keys(GK.SPECIAL).forEach((n, i) => setTimeout(() => loadSpecial(n), 300 * i)), 200);
 
+const doneCache = new Map();
 /* ---------------- public: render a scene to a canvas ---------------- */
 GK.art = {
   render(canvas, sceneId, g, special) {
     if (special && drawSpecial(special, canvas)) return;
     canvas._want = null;
-    if (canvas.width !== W) { canvas.width = W; canvas.height = H; }
+    if (canvas.width !== RW) { canvas.width = RW; canvas.height = RH; }
     const ctx = canvas.getContext('2d');
     const sc = S[sceneId] || S.missing;
+    // the same scene in the same state looks the same: reuse the finished picture
+    const st = g && g.s ? g.s : {};
+    const key = sceneId + '|' + JSON.stringify([st.flags, st.sticky, st.inv, st.who, st.split, st.fight && st.fight.phase, st.jamie]);
+    const hit = doneCache.get(key);
+    if (hit) { ctx.putImageData(hit, 0, 0); return; }
     seed = 1 + [...sceneId].reduce((a, ch) => a + ch.charCodeAt(0), 0) * 97;
+    c = baseCtx;
     c.setTransform(1, 0, 0, 1, 0, 0); c.globalAlpha = 1;
-    c.clearRect(0, 0, W, H);
-    sc.draw(T, g);
+    c.clearRect(0, 0, RW, RH);
+    c.setTransform(SCALE, 0, 0, SCALE, 0, 0);
+    try { sc.draw(T, g); } finally { c = baseCtx; }
+    // a soft vignette pulls the eye to the middle
+    c.setTransform(SCALE, 0, 0, SCALE, 0, 0); c.globalAlpha = 1;
+    if (!sc.flat) T.rect(0, 0, W, H, T.rad(W / 2, H * .46, H * .5, W * .68, ['rgba(0,0,0,0)', 'rgba(8,4,20,.34)']));
     quantize(ctx);
+    if (doneCache.size > 40) doneCache.delete(doneCache.keys().next().value);
+    doneCache.set(key, ctx.getImageData(0, 0, RW, RH));
   },
   hot(sceneId, g) { const sc = S[sceneId]; if (!sc) return []; return (typeof sc.hot === 'function' ? sc.hot(g) : sc.hot).filter(Boolean); },
   has: name => !!GK.SPECIAL[name],
@@ -2790,7 +2857,7 @@ Object.assign(P, {
   gwen: (x, y) => T.fig(x, y, { h: 30, bulk: 1.1, robe: true, top: '#7444a4', skin: '#d8bc94', hair: '#d0c8ba', hairStyle: 'grey', arms: 'fold',
     after: (x, y, s, hy, hr) => { T.poly([[x - hr * 1.4, hy + hr * 1.5], [x - hr * 1.2, hy - hr * .9], [x, hy - hr * 1.4], [x + hr * 1.2, hy - hr * .9], [x + hr * 1.4, hy + hr * 1.5], [x + hr, hy - hr * .2], [x - hr, hy - hr * .2]], '#c484e4'); T.glow(x, hy, 18, 'rgba(200,255,160,.15)'); } }),
   boris: (x, y, o = {}) => T.fig(x, y, Object.assign({ h: 58, bulk: .85, top: '#a09a90', sleeve: '#a09a90', legs: '#6c6862', feet: '#6c6862', skin: '#f4cca4', trim: '#9c6430',
-    after: (x, y, s, hy, hr) => { T.ell(x, hy - hr * .2, hr * 1.25, hr * 1.4, '#9c6430'); T.ell(x - hr * .3, hy - hr * .5, hr * .6, hr * .6, '#cc8c4c'); T.rect(x - hr, hy - hr * .1, hr * 2, 1.6 * s, '#1c1a18'); for (let i = 0; i < 5; i++) T.rect(x - hr + rnd() * hr * 2, hy - hr + rnd() * hr * 2, 2, 2, '#6e4422'); T.curve(x, hy - hr * 1.5, x + hr * 2, hy - hr * 3, x + hr * 2.5, hy - hr * .5, '#dc4c30', 2.5 * s); } }, o)),
+    after: (x, y, s, hy, hr) => { T.poly([[x - hr * 1.2, hy - hr * .15], [x - hr * 1.15, hy - hr * .9], [x, hy - hr * 1.5], [x + hr * 1.15, hy - hr * .9], [x + hr * 1.2, hy - hr * .15]], '#a09a90'); T.poly([[x - hr * .9, hy - hr * .8], [x - hr * .1, hy - hr * 1.3], [x - hr * .3, hy - hr * .5]], '#d0c8ba'); T.rect(x - hr * .14, hy - hr * .5, hr * .28, hr * .9, '#8a8478'); T.rect(x - hr * 1.2, hy + hr * .1, hr * .3, hr * 1, '#8a8478'); T.rect(x + hr * .9, hy + hr * .1, hr * .3, hr * 1, '#6c6862'); for (let i = 0; i < 4; i++) T.rect(x - hr + rnd() * hr * 2, hy - hr * 1.2 + rnd() * hr, 1.5, 1.5, '#9c6430'); T.curve(x, hy - hr * 1.5, x + hr * 2, hy - hr * 3, x + hr * 2.5, hy - hr * .5, '#dc4c30', 2.5 * s); } }, o)),
   bush(x, y, met) {
     T.shadow(x, y, 30, 5);
     T.rect(x - 14, y - 6, 9, 6, '#6e4422'); T.rect(x + 5, y - 6, 9, 6, '#6e4422');
@@ -2799,7 +2866,7 @@ Object.assign(P, {
     T.ell(x - 5, y - 30, 3, 2.4, '#ffffff'); T.ell(x + 5, y - 30, 3, 2.4, '#ffffff'); T.rect(x - 5, y - 30, 1.5, 2, '#000'); T.rect(x + 5, y - 30, 1.5, 2, '#000');
     T.ell(x, y - 25, 2.2, 2.8, '#cc8c4c');
   },
-  wheelan: (x, y, kissed) => T.fig(x, y, { h: 64, bulk: 1.9, top: '#9c6430', sleeve: '#9c6430', hair: '#f8d040', hairStyle: 'short', bow: '#f494b4', lips: '#dc4c30', legs: '#6e4422', arms: kissed ? 'wave' : 'fold', robe: true, skin: '#f4cca4',
+  wheelan: (x, y, kissed) => T.fig(x, y, { h: 52, bulk: 1.6, top: '#c4486c', trim: '#f0e6d0', sleeve: '#f4cca4', hair: '#f8d040', hairStyle: 'long', bow: '#f494b4', lips: '#dc4c30', arms: kissed ? 'wave' : 'hips', robe: true, skin: '#f4cca4', belt: '#f0e6d0',
     after: (x, y, s, hy, hr) => { T.ell(x - 3, hy + 1, 1.5, 1, '#f494b4'); T.ell(x + 3, hy + 1, 1.5, 1, '#f494b4'); if (kissed) { T.glow(x, hy, 22, 'rgba(255,140,190,.35)'); T.ell(x + 12, hy - 12, 3, 3, '#f494b4'); T.ell(x + 15, hy - 12, 3, 3, '#f494b4'); T.poly([[x + 9.5, hy - 11], [x + 18, hy - 11], [x + 13.5, hy - 5]], '#f494b4'); } } }),
   gus(x, y, s = 1, swim) {
     if (!swim) T.shadow(x, y, 44 * s, 6 * s);
@@ -2826,9 +2893,9 @@ Object.assign(P, {
     for (let k = 0; k < 6; k++) T.line(hx - 4 * s + k * 3.5 * s, hy - 13 * s, hx - 8 * s + k * 4 * s, hy - 22 * s, '#000', 1.3);
     T.ell(hx - 14 * s, hy + 2 * s, 4 * s, 2 * s, 'rgba(244,148,180,.7)');
   },
-  norman: (x, y) => T.fig(x, y, { h: 32, bulk: 1.15, skin: '#a09a90', top: '#6c6862', legs: '#a09a90', hairStyle: 'bald', ears: true, arms: 'fold',
+  norman: (x, y) => T.fig(x, y, { h: 38, bulk: 1.15, skin: '#a09a90', top: '#6c6862', legs: '#a09a90', hairStyle: 'bald', ears: true, arms: 'fold',
     after: (x, y, s, hy, hr) => { T.ell(x - 2.2 * s, hy - hr * .05, 2 * s, 2 * s, 'rgba(220,240,255,.4)'); T.ell(x + 2 * s, hy - hr * .05, 2 * s, 2 * s, 'rgba(220,240,255,.4)'); T.rect(x - 1 * s, hy - hr * .1, 2 * s, .8, '#3c3a38'); T.rect(x + 3 * s, y - 24 * s, 9 * s, 12 * s, '#9c6430'); T.rect(x + 4 * s, y - 23 * s, 7 * s, 10 * s, '#f0e6d0'); } }),
-  john: (x, y, o = {}) => T.fig(x, y, Object.assign({ h: 36, bulk: 1.6, top: '#a42c1c', trim: '#f8d040', hair: '#9c6430', hairStyle: 'short', beard: 'viking', beardCol: '#cc8c4c', belt: '#3c3a38', legs: '#6e4422', brows: 'angry',
+  john: (x, y, o = {}) => T.fig(x, y, Object.assign({ h: 42, bulk: 1.6, top: '#a42c1c', trim: '#f8d040', hair: '#9c6430', hairStyle: 'short', beard: 'viking', beardCol: '#cc8c4c', belt: '#3c3a38', legs: '#6e4422', brows: 'angry',
     after: (x, y, s, hy, hr) => { T.line(x - 12 * s, y - 30 * s, x - 18 * s, y - 50 * s, '#6e4422', 2 * s); T.poly([[x - 18 * s, y - 50 * s], [x - 26 * s, y - 56 * s], [x - 24 * s, y - 44 * s]], '#a09a90'); T.line(x + 2 * s, hy + hr * .7, x + 10 * s, hy + hr * .9, '#6e4422', 1.5); T.rect(x + 9 * s, hy + hr * .2, 3 * s, 4 * s, '#6e4422'); for (let i = 0; i < 4; i++) T.circ(x + 12 * s + i * 2, hy - i * 4 * s, 1.5 + i * .6, 'rgba(240,240,240,.45)'); } }, o)),
   yeast(x, y, s = 1, awake) {
     T.shadow(x, y, 26 * s, 4 * s);
@@ -2839,13 +2906,13 @@ Object.assign(P, {
     T.rect(x - 24 * s, y - 50 * s, 2, 50 * s, 'rgba(255,255,255,.5)'); T.rect(x + 22 * s, y - 50 * s, 2, 50 * s, 'rgba(255,255,255,.25)');
     T.rect(x - 26 * s, y - 54 * s, 52 * s, 5 * s, '#a09a90'); T.rect(x - 24 * s, y - 2, 48 * s, 2, '#a09a90');
   },
-  christina: (x, y, o = {}) => T.fig(x, y, Object.assign({ h: 44, bulk: 1.7, top: '#3c3a38', sleeve: '#a42c1c', hair: '#a42c1c', hairStyle: 'short', legs: '#3c3a38', skin: '#f4b494', arms: 'down',
+  christina: (x, y, o = {}) => T.fig(x, y, Object.assign({ h: 50, bulk: 1.7, top: '#3c3a38', sleeve: '#a42c1c', hair: '#a42c1c', hairStyle: 'short', legs: '#3c3a38', skin: '#f4b494', arms: 'down',
     after: (x, y, s, hy, hr, yT) => { T.circ(x, hy - hr * 1.2, hr * .6, '#a42c1c'); T.rect(x - 7 * s, yT + 4 * s, 14 * s, 26 * s, '#d0c8ba'); for (let i = 0; i < 8; i++) T.rect(x - 6 * s + rnd() * 12 * s, yT + 6 * s + rnd() * 22 * s, 2, 2, '#3c3a38'); T.ell(x - 2.5 * s, hy + 1.5 * s, 1.5 * s, 1 * s, '#dc4c30'); T.ell(x + 2.5 * s, hy + 1.5 * s, 1.5 * s, 1 * s, '#dc4c30'); T.rect(x - 1.5 * s, hy + hr * .6, 3 * s, 1, '#6e4422'); } }, o)),
-  tracey: (x, y, o = {}) => T.fig(x, y, Object.assign({ h: 26, bulk: .9, skin: '#8cc454', ears: true, top: '#cc8c4c', legs: '#8cc454', hairStyle: 'bald', arms: 'down', mouth: '#3c0c0c',
+  tracey: (x, y, o = {}) => T.fig(x, y, Object.assign({ h: 32, bulk: .9, skin: '#8cc454', ears: true, top: '#cc8c4c', legs: '#8cc454', hairStyle: 'bald', arms: 'down', mouth: '#3c0c0c',
     after: (x, y, s, hy, hr) => { T.rect(x - 3 * s, hy + hr * .6, 6 * s, 1.2 * s, '#3c0c0c'); T.ell(x - 4 * s, y - 6 * s, 2 * s, 1.5 * s, '#7444a4'); T.ell(x + 4 * s, y - 5 * s, 2 * s, 1.5 * s, '#7444a4'); } }, o)),
   les(x, y, scarf) {
     T.fig(x, y, { h: 62, bulk: 1.9, skin: '#3c3a38', top: '#9c6430', trim: '#f0e6d0', sleeve: '#3c3a38', legs: '#3c3a38', hairStyle: 'bald', arms: 'cup',
-      after: (x, y, s, hy, hr) => { T.ell(x + hr * .5, hy, hr * .55, hr * 1.15, '#f0e6d0'); T.rect(x + 1, hy + hr * 1.2, 2.5 * s, 4 * s, '#f0e6d0'); T.rect(x + 2 * s, hy - hr * .1, Math.max(1, s), Math.max(1, s), '#000'); T.rect(x - 2.5 * s, hy - hr * .1, Math.max(1, s), Math.max(1, s), '#ffffff'); } });
+      after: (x, y, s, hy, hr) => { T.c.save(); T.c.beginPath(); T.c.rect(x, hy - hr * 1.3, hr * 1.2, hr * 2.6); T.c.clip(); T.ell(x, hy, hr, hr * 1.15, '#f0e6d0'); T.c.restore(); T.rect(x, hy + hr * 1.05, 2 * s, 3 * s, '#f0e6d0'); T.circ(x + hr * .46, hy, hr * .13, '#1c1a18'); T.line(x + hr * .2, hy - hr * .4, x + hr * .7, hy - hr * .36, '#6c6862', Math.max(.6, s * .5)); T.curve(x - hr * .3, hy + hr * .7, x, hy + hr * .9, x + hr * .3, hy + hr * .7, '#6c6862', Math.max(.7, s * .5)); } });
     if (scarf) { const cols = ['#dc4c30', '#f8d040', '#3c74cc', '#4c8c30', '#f494b4']; for (let i = 0; i < 18; i++) T.rect(x - 4 + i * 4 - (i > 6 ? (i - 6) * 7 : 0), y - 22 + (i > 6 ? (i - 6) * 2.4 : 0), 6, 4, cols[i % 5]); T.line(x - 4, y - 26, x + 6, y - 34, '#d0c8ba', 1.2); T.line(x + 4, y - 26, x - 4, y - 34, '#d0c8ba', 1.2); }
   },
   ghost(x, y, happy) {
@@ -2861,7 +2928,7 @@ Object.assign(P, {
   },
   baronJar(x, y, s = 1) {
     T.rect(x - 6 * s, y - 14 * s, 12 * s, 14 * s, 'rgba(200,230,255,.35)'); T.rect(x - 7 * s, y - 16 * s, 14 * s, 3 * s, '#a42c1c');
-    T.fig(x, y - 1, { h: 10 * s, top: '#a09a90', hair: '#f8d040', hairStyle: 'short', skin: '#dc4c30', arms: 'up', brows: 'angry' });
+    T.fig(x, y - 1, { fixed: true, noShadow: true, h: 10 * s, top: '#a09a90', hair: '#f8d040', hairStyle: 'short', skin: '#dc4c30', arms: 'up', brows: 'angry' });
     T.rect(x - 6 * s, y - 14 * s, 1, 14 * s, 'rgba(255,255,255,.6)');
   },
   jon: (x, y, o = {}) => T.fig(x, y, Object.assign({ h: 52, bulk: .8, top: '#f0e6d0', trim: '#4c8c30', robe: true, hairStyle: 'bald', ears: true, skin: '#e8a070', arms: 'down',
@@ -2894,6 +2961,9 @@ Object.assign(P, {
   tankard(x, y, foam) { T.rect(x - 4, y - 10, 8, 10, '#a09a90'); T.rect(x + 4, y - 8, 3, 6, '#6c6862'); T.rect(x - 4, y - 10, 8, 2, foam ? '#ffffff' : '#84b4f0'); if (foam) T.ell(x, y - 11, 5, 2.5, '#ffffff'); }
 });
 
+// props and creatures get the same dark outline as the people
+['hamish', 'gus', 'ethel', 'yeast', 'brenda', 'ogreHead', 'head', 'bush', 'baronJar', 'pecky', 'katSleep', 'katSit', 'chest', 'cart', 'tankard', 'les', 'sausageman'].forEach(k => { const f = P[k]; if (f) P[k] = (...a) => T.outlined(() => f(...a)); });
+
 /* ================= THE SCENES ================= */
 S.missing = { draw(T) { T.vgrad(0, 0, W, H, '#1c1a18', '#3c3a38'); }, hot: [] };
 
@@ -2914,7 +2984,7 @@ S.tavern = {
     T.rect(126, 74, 30, 3, '#6e4422'); for (let i = 0; i < 3; i++) T.rect(128 + i * 9, 64, 6, 10, ['#3c74cc', '#4c8c30', '#a42c1c'][i]);
     if (f('headTaken')) { T.rect(78, 22, 40, 36, 'rgba(255,240,210,.35)'); T.rect(96, 18, 4, 4, '#3c3a38'); }
     else P.ogreHead(98, 40, .95);
-    P.gaius(100, 120, { h: 58 });
+    P.gaius(100, 121, { h: 44 });
     // the bar
     T.rect(34, 100, 124, 34, '#6e4422'); T.planks(34, 104, 124, 30, 5, '#9c6430', true); T.rect(30, 96, 132, 6, '#9c6430'); T.rect(30, 96, 132, 2, '#cc8c4c');
     for (let i = 0; i < 5; i++) P.tankard(48 + i * 24, 96, false);
@@ -2964,7 +3034,11 @@ S.villa = {
   draw(T, g) {
     const f = F(g);
     T.plaster(0, 0, W, 116, '#f0e6d0'); T.rect(0, 0, W, 8, '#a42c1c'); T.rect(0, 8, W, 2, '#f8d040');
-    T.tiles(116, '#e8a070', '#f0e6d0');
+    T.rect(0, 96, W, 20, '#a42c1c'); T.rect(0, 96, W, 2, '#f8d040'); for (let i = 0; i < 20; i++) T.poly([[i * 16 + 4, 112], [i * 16 + 8, 102], [i * 16 + 12, 112]], '#c8483c');
+    T.tiles(116, '#e8a070', '#f0e6d0'); T.rect(0, 116, W, 3, 'rgba(0,0,0,.25)');
+    T.column(170, 14, 12, 102, '#e8dcc4'); T.column(196, 14, 0.01, 0.01, '#e8dcc4');
+    T.outlined(() => { T.poly([[300, 150], [316, 150], [313, 168], [303, 168]], '#c8643c'); T.canopy(308, 138, 9, 12, 14, ['#8cc454', '#4c8c30', '#1c3c14']); });
+    T.poly([[214, 116], [308, 116], [330, 180], [200, 180]], 'rgba(255,170,90,.08)');
     // painted track on the wall
     T.rect(10, 26, 150, 70, '#4c8c30'); T.ell(85, 62, 64, 28, '#cc8c4c'); T.ell(85, 62, 46, 16, '#4c8c30');
     for (let i = 0; i < 8; i++) T.rect(26 + i * 15, 30, 6, 6, ['#a42c1c', '#1c3c8c', '#f8d040'][i % 3]);
@@ -3006,9 +3080,15 @@ S.gate = {
 
 /* ---------- CHAPTER 2 ---------- */
 const woods = (sky = '#84b4f0') => {
-  T.sky(100, sky, '#cce4ff');
-  for (let i = 0; i < 9; i++) { const x = i * 40 + rnd() * 10; T.rect(x + 8, 20, 8, 90, '#3c2414'); T.canopy(x + 12, 26, 26, 22, 30, ['#4c8c30', '#2c5c22', '#1c3c14']); }
-  T.grass(96, 180, '#2c5c22', '#4c8c30');
+  T.sky(100, sky, '#e4f4ff');
+  T.glow(250, 30, 60, 'rgba(255,244,180,.5)');
+  T.hills(98, '#7cac5c', 9, 3, 1); T.hills(100, '#5c9444', 6, 5, 2.4);
+  // far trees, then near trees
+  for (let i = 0; i < 14; i++) { const x = i * 25 + rnd() * 8; T.rect(x + 5, 44, 4, 56, '#4c3420'); T.canopy(x + 7, 46, 15, 13, 14, ['#6ca050', '#3c7430', '#245020']); }
+  for (let i = 0; i < 9; i++) { const x = i * 40 + rnd() * 10; T.rect(x + 8, 20, 9, 90, T.lin(x + 8, 0, x + 17, 0, ['#6e4a2c', '#3c2414'])); T.canopy(x + 12, 24, 27, 23, 34, ['#8cc454', '#2c6c26', '#14381c']); }
+  T.grass(96, 180, '#2c5c22', '#58a03c');
+  for (let i = 0; i < 26; i++) { const x = rnd() * W, y = 108 + rnd() * 68; T.rect(x, y - 2, .7, 2.4, '#2c5c22'); T.circ(x, y - 3, 1.1, ['#fff4a0', '#f494b4', '#ffffff', '#c484e4'][i % 4]); }
+  for (let i = 0; i < 5; i++) { const x = 30 + i * 62 + rnd() * 20; T.poly([[x, 0], [x + 14, 0], [x - 26, 180], [x - 58, 180]], 'rgba(255,250,200,.055)'); }
 };
 S.road = {
   draw(T, g) {
@@ -3091,14 +3171,14 @@ S.sea = {
     const gone = g && g.f('ethelGone');
     T.sky(80, '#6c6862', '#cce4ff'); T.water(76, 180, '#3c74cc', '#1c3c8c');
     T.rect(0, 74, W, 3, '#3c3a38');
-    if (!gone) { P.ethel(170, 140, .9); P.gus(290, 146, .5, 'love'); }
+    if (!gone) { P.ethel(160, 140, .9); P.gus(292, 152, .78, 'love'); }
     else { P.ethel(60, 92, .25); P.gus(84, 90, .2, 'love'); T.ell(72, 72, 4, 4, '#f494b4'); }
     // bow of the boat
     T.poly([[90, 180], [230, 180], [200, 150], [160, 140], [120, 150]], '#9c6430'); T.poly([[100, 180], [220, 180], [196, 156], [160, 148], [124, 156]], '#6e4422');
     P.baronJar(180, 170, 1.4);
     T.light('rgba(200,220,255,.08)', 'rgba(10,20,60,.2)');
   },
-  hot: g => [!g.f('ethelGone') ? [40, 20, 170, 110, 'ethel', 'Ethel the sea serpent'] : null, !g.f('ethelGone') ? [262, 126, 58, 30, 'gus', 'Gus the walrus'] : null, [90, 140, 140, 40, 'boat', 'the boat'], [0, 76, 320, 50, g.f('ethelGone') ? '>north' : 'waves', g.f('ethelGone') ? 'Row on (north)' : 'the sea']]
+  hot: g => [!g.f('ethelGone') ? [40, 20, 170, 110, 'ethel', 'Ethel the sea serpent'] : null, !g.f('ethelGone') ? [224, 112, 96, 46, 'gus', 'Gus the walrus'] : null, [90, 140, 140, 40, 'boat', 'the boat'], [0, 76, 320, 50, g.f('ethelGone') ? '>north' : 'waves', g.f('ethelGone') ? 'Row on (north)' : 'the sea']]
 };
 
 /* ---------- CHAPTER 4 ---------- */
@@ -3151,6 +3231,21 @@ S.vault = {
   hot: [[124, 52, 72, 92, 'yeast', 'the Mother Yeast'], [230, 64, 74, 32, 'jugs', 'measuring jugs'], [40, 124, 40, 50, 'john', 'John the Dwarf'], [0, 10, 320, 40, 'barrels'], [0, 140, 30, 40, '>west', 'Brewhall (west)']]
 };
 
+/* shared bits for the Tower scenes */
+const stone = (dark = .3) => { T.blocks(0, 0, W, H, 22, 11, '#8a8478', 14); T.rect(0, 0, W, H, `rgba(26,20,48,${dark})`); };
+const nightWindow = (x, y, w, h) => {
+  T.rect(x - 4, y, w + 8, h + 4, '#4c4a48'); T.ell(x + w / 2, y, w / 2 + 4, w / 3 + 3, '#4c4a48');
+  T.c.save(); T.c.beginPath(); T.c.rect(x, y, w, h); T.c.ellipse(x + w / 2, y, w / 2, w / 3, 0, 0, 7); T.c.clip();
+  T.vgrad(x, y - w / 3, w, h + w / 3, '#0c1030', '#3c5cb0');
+  for (let i = 0; i < 14; i++) T.rect(x + rnd() * w, y - w / 3 + rnd() * h * .6, 1, 1, '#ffffff');
+  T.mountains(y + h, '#1c2448', [[x + w * .3, h * .45, w * .4], [x + w * .75, h * .6, w * .4]], '#cce4ff');
+  T.c.restore();
+  T.rect(x + w / 2 - 1, y - w / 3, 2, h + w / 3, '#4c4a48'); T.rect(x - 4, y + h, w + 8, 4, '#a09a90');
+  T.poly([[x, y + h + 4], [x + w, y + h + 4], [x + w + 26, H], [x - 26, H]], 'rgba(120,160,255,.07)');
+};
+const banner = (x, y, col = '#e4f4ff') => { T.rect(x - 1, y - 3, 26, 3, '#6e4422'); T.poly([[x, y], [x + 24, y], [x + 24, y + 54], [x + 12, y + 46], [x, y + 54]], col); T.poly([[x + 14, y], [x + 24, y], [x + 24, y + 54], [x + 14, y + 47]], 'rgba(0,0,0,.12)'); T.poly([[x + 12, y + 14], [x + 17, y + 26], [x + 7, y + 26]], '#3c74cc'); T.ell(x + 12, y + 27, 5, 5, '#3c74cc'); T.ell(x + 10, y + 25, 1.5, 2, '#cce4ff'); };
+const steps = (x, y, n, dir = 1) => { for (let i = 0; i < n; i++) { const sx = x + dir * i * 9, sy = y - i * 11; T.rect(dir > 0 ? sx : sx - 40, sy, 40, 11, '#6c6862'); T.rect(dir > 0 ? sx : sx - 40, sy, 40, 3, '#b8b0a0'); T.rect(dir > 0 ? sx : sx - 40, sy + 3, 40, 1, '#3c3a38'); } };
+
 /* ---------- CHAPTER 5 ---------- */
 S.kitchen = {
   draw(T, g) {
@@ -3183,16 +3278,27 @@ S.kitchen = {
 S.hall = {
   draw(T, g) {
     const f = F(g);
-    T.blocks(0, 0, W, 116, 18, 9, '#d0c8ba', 12);
-    T.planks(0, 116, W, 64, 8, '#6e4422');
-    T.rect(240, 20, 50, 80, '#84b4f0'); T.ell(265, 20, 25, 12, '#84b4f0'); T.rect(238, 98, 54, 4, '#a09a90'); T.mountains(100, '#a09a90', [[262, 30, 20]], '#ffffff');
-    T.rect(30, 110, 190, 10, '#9c6430'); T.rect(40, 120, 6, 30, '#6e4422'); T.rect(204, 120, 6, 30, '#6e4422');
-    T.ell(130, 108, 20, 5, '#3c3a38');
-    if (!f('daveClimbed')) P.dave(130, 108, { arms: 'up' }); else { T.rect(120, 60, 6, 4, '#dc4c30'); }
-    T.rect(0, 40, 26, 80, '#1c1a18'); T.rect(290, 106, 30, 12, '#a09a90'); T.rect(296, 94, 24, 12, '#a09a90'); T.rect(302, 82, 18, 12, '#a09a90');
-    T.light();
+    stone(.34);
+    nightWindow(242, 30, 46, 66);
+    banner(52, 14); banner(160, 14);
+    T.torch(118, 48); T.torch(214, 48);
+    T.planks(0, 118, W, 62, 8, '#6e4422'); T.rect(0, 118, W, 3, 'rgba(0,0,0,.35)');
+    T.glow(118, 130, 60, 'rgba(255,170,80,.12)');
+    // doorway to the kitchen
+    T.rect(0, 36, 28, 84, '#3c3a38'); T.ell(14, 36, 14, 9, '#3c3a38'); T.rect(3, 40, 22, 80, '#140c0c'); T.glow(10, 100, 24, 'rgba(255,120,40,.35)');
+    // the long table, benches, and what's left of supper
+    T.rect(40, 138, 150, 5, '#6e4422'); T.rect(46, 143, 5, 12, '#3c2414'); T.rect(180, 143, 5, 12, '#3c2414');
+    T.rect(28, 106, 194, 10, '#9c6430'); T.rect(28, 106, 194, 2, '#d8a060'); T.rect(28, 114, 194, 2, '#3c2414');
+    T.rect(38, 116, 7, 34, '#6e4422'); T.rect(204, 116, 7, 34, '#6e4422');
+    T.ell(84, 105, 8, 2.5, '#d0c8ba'); T.ell(176, 105, 8, 2.5, '#d0c8ba'); T.outlined(() => { P.tankard(60, 106, false); P.tankard(196, 106, false); });
+    T.outlined(() => { T.ell(134, 104, 20, 6, '#3c3a38'); T.ell(134, 102, 17, 4, '#1c1a18'); T.ell(128, 102, 8, 2, '#9c6430'); });
+    T.ell(108, 110, 12, 2, '#9c6430'); T.rect(104, 116, 2, 8, '#9c6430'); T.ell(105, 126, 3, 1.5, '#9c6430');
+    if (!f('daveClimbed')) P.dave(150, 106, { arms: 'up', h: 42 });
+    else { T.rect(270, 92, 8, 3, '#dc4c30'); T.rect(262, 96, 4, 2, '#f0e6d0'); }
+    steps(282, 150, 6);
+    T.light('rgba(255,170,80,.08)', 'rgba(10,10,50,.22)');
   },
-  hot: g => [!g.f('daveClimbed') ? [104, 50, 52, 60, 'dave', 'Dave the Viking'] : null, [236, 10, 58, 92, 'window'], [28, 100, 194, 22, 'table'], [286, 76, 34, 44, '>up', 'The Great Stair (up)'], [0, 40, 26, 80, '>west', 'Kitchen (west)']]
+  hot: g => [!g.f('daveClimbed') ? [122, 30, 58, 78, 'dave', 'Dave the Viking'] : null, [236, 10, 58, 92, 'window'], [28, 98, 194, 24, 'table'], [278, 84, 42, 78, '>up', 'The Great Stair (up)'], [0, 36, 28, 84, '>west', 'Kitchen (west)']]
 };
 
 S.cell = {
@@ -3238,58 +3344,93 @@ S.guardroom = {
 
 S.stair = {
   draw(T, g) {
-    T.vgrad(0, 0, W, H, '#f0e6d0', '#a09a90');
-    for (let i = 0; i < 9; i++) { const y = 170 - i * 18, x = 160 + Math.sin(i * .9) * 70; T.poly([[x - 50, y], [x + 50, y], [x + 40, y - 10], [x - 40, y - 10]], i % 2 ? '#d0c8ba' : '#e8dcc4'); T.rect(x - 50, y, 100, 3, '#a09a90'); }
-    T.column(10, 20, 14, 150, '#e8dcc4'); T.column(296, 20, 14, 150, '#e8dcc4');
-    const post = (x, y, c) => { T.rect(x, y, 34, 44, '#ffffff'); T.rect(x + 2, y + 2, 30, 24, c); T.rect(x + 4, y + 30, 26, 2, '#3c3a38'); T.rect(x + 4, y + 35, 20, 2, '#3c3a38'); };
-    post(36, 30, '#84b4f0'); post(250, 40, '#8cc454'); post(40, 100, '#f494b4');
-    if (g && g.s.split) { if (g.isJamie) P.jamie(140, 172, { h: 54 }); else P.rich(140, 172, { h: 40 }); }
-    else { P.rich(130, 174, { h: 40 }); P.jamie(170, 174, { h: 56 }); }
+    stone(.3);
+    // the great central pillar, with the stair winding round it
+    T.rect(136, 0, 48, H, T.lin(136, 0, 184, 0, ['#b8b0a0', '#8a8478', '#4c4a48']));
+    for (let i = 0; i < 9; i++) T.rect(136, i * 22 + 6, 48, 1, 'rgba(0,0,0,.25)');
+    for (let i = 0; i < 7; i++) {
+      const y = 150 - i * 21, left = i % 2 === 0, x0 = left ? 60 - i * 3 : 184, w = left ? 76 + i * 3 : 76 + i * 3;
+      T.poly([[x0, y], [x0 + w, y], [x0 + w - (left ? 0 : 8), y - 8], [x0 + (left ? 8 : 0), y - 8]], '#c8c0b0');
+      T.rect(x0, y, w, 9, '#6c6862'); T.rect(x0, y, w, 1.5, '#e0d8c8'); T.rect(x0, y + 9, w, 3, 'rgba(0,0,0,.3)');
+    }
+    T.rect(0, 160, W, 20, '#5c5850'); T.rect(0, 160, W, 2, '#a09a90');
+    nightWindow(24, 26, 20, 46);
+    T.torch(96, 50); T.torch(226, 50);
+    // Jon's motivational posters
+    const post = (x, y, c2, pic) => { T.outlined(() => { T.rect(x, y, 36, 46, '#f0e6d0'); T.rect(x + 3, y + 3, 30, 24, c2); pic(x + 18, y + 15); T.rect(x + 5, y + 31, 26, 2, '#3c3a38'); T.rect(x + 8, y + 36, 20, 2, '#6c6862'); T.rect(x + 16, y - 2, 4, 3, '#a42c1c'); }); };
+    post(56, 84, '#84b4f0', (x, y) => { T.poly([[x, y - 8], [x + 5, y + 2], [x - 5, y + 2]], '#ffffff'); T.ell(x, y + 3, 5, 5, '#ffffff'); });
+    post(236, 30, '#8cc454', (x, y) => { T.ell(x, y - 4, 3, 3, '#f4cca4'); T.line(x, y - 1, x, y + 6, '#f0e6d0', 2); T.line(x - 8, y - 6, x + 8, y - 6, '#f0e6d0', 1.5); T.line(x, y + 6, x - 6, y + 10, '#f0e6d0', 1.5); T.line(x, y + 6, x + 6, y + 10, '#f0e6d0', 1.5); });
+    post(250, 98, '#f494b4', (x, y) => { T.ell(x, y, 8, 8, '#fff4a0'); for (let i = 0; i < 8; i++) { const a = i / 8 * 6.28; T.line(x + Math.cos(a) * 10, y + Math.sin(a) * 10, x + Math.cos(a) * 12, y + Math.sin(a) * 12, '#fff4a0', 1); } });
+    if (g && g.s.split) { if (g.isJamie) P.jamie(150, 174, { h: 46 }); else P.rich(150, 174, { h: 34 }); }
+    else { P.rich(116, 176, { h: 34 }); P.jamie(200, 176, { h: 46 }); }
+    T.light('rgba(255,170,80,.07)', 'rgba(10,10,50,.2)');
   },
-  hot: g => [[32, 26, 260, 120, 'posters', 'motivational posters'], [100, 0, 120, 30, g.s.split ? 'stairs' : '>up', g.s.split ? 'the Great Stair' : 'Up the stairs'], [0, 160, 100, 20, '>down', 'Back down']]
+  hot: g => [[50, 24, 240, 124, 'posters', 'motivational posters'], [100, 0, 120, 24, g.s.split ? 'stairs' : '>up', g.s.split ? 'the Great Stair' : 'Up the stairs'], [0, 160, 100, 20, '>down', 'Back down']]
 };
 
 /* ---------- CHAPTER 6 ---------- */
 S.landing = {
   draw(T, g) {
     const open = g && g.f('doorSung');
-    T.vgrad(0, 0, W, H, '#e8dcc4', '#a09a90');
-    T.planks(0, 140, W, 40, 10, '#d0c8ba');
-    T.rect(100, 10, 120, 134, '#ffffff'); T.ell(160, 12, 60, 14, '#ffffff');
-    if (open) { T.rect(108, 20, 104, 124, '#1c3c8c'); T.glow(160, 80, 60, 'rgba(255,255,255,.4)'); }
-    else { T.rect(108, 20, 104, 124, '#f0e6d0'); const cols = ['#dc4c30', '#f08c34', '#f8d040', '#4c8c30', '#3c74cc', '#7444a4', '#f494b4', '#e4f4ff'];
-      for (let i = 0; i < 8; i++) { const x = 116 + i * 11 + (i > 3 ? 8 : 0); T.rect(x, 60, 8, 34, cols[i]); T.rect(x, 60, 8, 3, 'rgba(255,255,255,.6)'); } T.rect(130, 104, 60, 6, '#cc8c4c'); }
-    P.derek(56, 162, { arms: 'cup' });
-    T.rect(40, 150, 30, 4, '#6e4422'); T.rect(44, 154, 3, 14, '#6e4422'); T.rect(64, 154, 3, 14, '#6e4422');
-    T.light('rgba(255,255,255,.06)', 'rgba(40,40,80,.12)');
+    stone(.26);
+    T.rect(0, 142, W, 38, '#5c5850'); T.rect(0, 142, W, 2, '#a09a90');
+    T.poly([[118, 144], [202, 144], [236, 180], [84, 180]], '#a42c1c'); T.poly([[124, 144], [128, 144], [96, 180], [90, 180]], '#f8d040'); T.poly([[192, 144], [196, 144], [230, 180], [224, 180]], '#f8d040');
+    T.torch(74, 60); T.torch(246, 60);
+    // the great door
+    T.rect(96, 12, 128, 132, '#c8a030'); T.ell(160, 14, 64, 16, '#c8a030'); T.rect(100, 14, 120, 130, '#8a6a10'); T.ell(160, 16, 60, 13, '#8a6a10');
+    if (open) { T.rect(106, 20, 108, 124, '#0c1030'); T.ell(160, 20, 54, 10, '#0c1030'); T.glow(160, 90, 70, 'rgba(120,180,255,.5)'); T.rect(106, 20, 12, 124, '#f0e6d0'); T.rect(202, 20, 12, 124, '#d0c8ba'); }
+    else {
+      T.rect(106, 20, 108, 124, T.lin(106, 0, 214, 0, ['#ffffff', '#f0e6d0', '#b8b0a0'])); T.ell(160, 20, 54, 10, '#f0e6d0'); T.rect(159, 20, 2, 124, '#a09a90');
+      const cols = ['#dc4c30', '#f08c34', '#f8d040', '#4c8c30', '#3c74cc', '#7444a4', '#f494b4', '#e4f4ff'];
+      T.rect(112, 54, 96, 46, '#3c3a38');
+      for (let i = 0; i < 8; i++) { const x = 115 + i * 11 + (i > 3 ? 4 : 0); T.glow(x + 4, 77, 10, 'rgba(255,255,255,.12)'); T.rect(x, 58, 8, 38, cols[i]); T.rect(x, 58, 8, 4, 'rgba(255,255,255,.55)'); T.rect(x + 5, 58, 3, 38, 'rgba(0,0,0,.15)'); }
+      T.rect(128, 108, 64, 8, '#c8a030'); T.rect(132, 111, 56, 2, '#3c2414');
+      for (const y of [30, 124]) for (const x of [116, 204]) T.circ(x, y, 2.5, '#c8a030');
+    }
+    T.rect(38, 152, 34, 5, '#6e4422'); T.rect(42, 157, 4, 16, '#3c2414'); T.rect(64, 157, 4, 16, '#3c2414');
+    P.derek(56, 154, { arms: 'cup', h: 38 });
+    for (let i = 0; i < 3; i++) { T.ell(82 + i * 9, 100 - i * 12, 2.5, 2, '#f0e6d0'); T.rect(84 + i * 9, 92 - i * 12, 1, 8, '#f0e6d0'); }
+    T.light('rgba(255,170,80,.08)', 'rgba(10,10,50,.2)');
   },
-  hot: g => [[34, 110, 46, 56, 'derek', 'Derek the Jester'], [100, 10, 120, 134, g.f('doorSung') ? '>north' : 'door', g.f('doorSung') ? 'The sanctum (north)' : 'the Duet Lock door'], [240, 150, 80, 30, '>down', 'Down the stairs']]
+  hot: g => [[30, 84, 56, 92, 'derek', 'Derek the Jester'], [96, 0, 128, 144, g.f('doorSung') ? '>north' : 'door', g.f('doorSung') ? 'The sanctum (north)' : 'the Duet Lock door'], [240, 150, 80, 30, '>down', 'Down the stairs']]
 };
 
 S.sanctum = {
   draw(T, g) {
     const f = g && g.s.fight, ph = f ? f.phase : (g && g.f('jonEaten') ? 'stone' : 'none');
-    T.vgrad(0, 0, W, 120, '#cce4ff', '#f0e6d0');
-    T.rect(0, 20, 60, 70, '#84b4f0'); T.rect(260, 20, 60, 70, '#84b4f0'); T.mountains(90, '#e4f4ff', [[30, 40, 30], [290, 50, 30]], '#ffffff');
-    T.tiles(120, '#f0e6d0', '#d0c8ba');
-    for (let i = 0; i < 4; i++) T.rect(20 + i * 70, 150 + (i % 2) * 10, 40, 8, ['#f494b4', '#8cc454', '#84b4f0', '#f8d040'][i]);
-    T.rect(140, 110, 40, 30, '#a09a90'); T.ell(160, 96, 22, 18, ph === 'stone' ? '#3c3a38' : '#1c1a18');
-    if (ph === 'stone') { T.line(156, 80, 164, 110, '#84b4f0', 2); for (let i = 0; i < 6; i++) T.curve(160, 96, 140 + i * 8, 70, 120 + i * 16, 140, 'rgba(132,180,240,.7)', 3); T.rect(0, 150, W, 30, 'rgba(60,116,204,.6)'); }
-    else { T.glow(160, 96, 30, 'rgba(60,116,204,.35)'); for (let i = 0; i < 3; i++) T.rect(152 + i * 8, 112, 1.5, 6, '#84b4f0'); }
-    T.rect(206, 116, 30, 26, '#d0c8ba');
-    if (ph !== 'grab' && ph !== 'stone') P.yeast(221, 116, .45, true);
+    // a round white room at the top of the world, at night
+    T.vgrad(0, 0, W, 122, '#2c3468', '#7484c0');
+    for (let i = 0; i < 6; i++) T.rect(i * 64 - 6, 0, 12, 122, T.lin(i * 64 - 6, 0, i * 64 + 6, 0, ['#f0e6d0', '#b8b0c8', '#6c6890']));
+    T.rect(0, 0, W, 8, '#b8b0c8'); T.rect(0, 8, W, 2, '#6c6890');
+    nightWindow(22, 34, 34, 64); nightWindow(264, 34, 34, 64);
+    if (ph === 'dave' || ph === 'grab' || ph === 'stone') { for (let i = 0; i < 9; i++) T.line(281, 60, 262 + rnd() * 40, 24 + rnd() * 76, '#e4f4ff', 1); T.poly([[270, 40], [290, 52], [284, 80], [268, 70]], '#0c1030'); }
+    T.tiles(122, '#d0c8e0', '#8c88b8');
+    T.rect(0, 122, W, 3, 'rgba(0,0,0,.3)');
+    // yoga mats and candles
+    for (let i = 0; i < 4; i++) { const x = 18 + i * 78, y = 158 + (i % 2) * 8; T.poly([[x, y], [x + 44, y], [x + 50, y + 8], [x - 6, y + 8]], ['#f494b4', '#8cc454', '#84b4f0', '#f8d040'][i]); T.poly([[x, y], [x + 44, y], [x + 45, y + 2], [x - 1, y + 2]], 'rgba(255,255,255,.3)'); }
+    for (const [x, y] of [[70, 126], [96, 130], [226, 126], [250, 130]]) { T.glow(x, y - 8, 12, 'rgba(255,200,100,.45)'); T.rect(x - 1.5, y - 6, 3, 8, '#f0e6d0'); T.ell(x, y - 8, 1.4, 2.6, '#f8d040'); }
+    // the Dry Stone on its pedestal
+    T.outlined(() => { T.poly([[140, 142], [180, 142], [176, 108], [144, 108]], T.lin(140, 0, 180, 0, ['#d0c8ba', '#a09a90', '#6c6862'])); T.rect(138, 104, 44, 6, '#d0c8ba'); T.rect(136, 140, 48, 5, '#a09a90'); });
+    T.glow(160, 86, 46, ph === 'stone' ? 'rgba(120,200,255,.6)' : 'rgba(60,120,255,.45)');
+    T.outlined(() => { T.poly([[142, 100], [146, 78], [156, 68], [170, 70], [180, 84], [178, 102], [162, 106]], '#14142c'); T.poly([[146, 80], [156, 70], [162, 72], [152, 88]], '#2c3468'); T.poly([[166, 78], [176, 86], [172, 98]], '#0c0c1c'); });
+    if (ph === 'stone') { T.line(158, 70, 164, 104, '#cce4ff', 2); for (let i = 0; i < 8; i++) T.curve(160, 88, 130 + i * 9, 58, 108 + i * 15, 150, 'rgba(132,180,240,.75)', 3); T.rect(0, 148, W, 32, 'rgba(60,116,204,.55)'); for (let i = 0; i < 20; i++) T.rect(rnd() * W, 150 + rnd() * 28, 8 + rnd() * 14, 1, 'rgba(255,255,255,.4)'); }
+    else for (let i = 0; i < 4; i++) T.ell(150 + i * 7, 112 + (i % 2) * 5, 1.2, 2.2, '#84b4f0');
+    // the altar and the Mother
+    T.outlined(() => { T.rect(206, 118, 34, 26, T.lin(206, 0, 240, 0, ['#f0e6d0', '#b8b0a0'])); T.rect(204, 114, 38, 5, '#f0e6d0'); T.rect(210, 124, 26, 2, '#c8a030'); });
+    if (ph !== 'grab' && ph !== 'stone') P.yeast(223, 114, .5, true);
     if (ph === 'none' || ph === 'bolt') {
-      P.jon(110, 160, { arms: 'wave' });
-      if (ph === 'bolt') { T.line(124, 108, 320, 150, '#84b4f0', 5); T.line(124, 108, 320, 150, '#ffffff', 2); T.glow(124, 108, 16, 'rgba(160,220,255,.8)'); }
+      P.jon(104, 160, { arms: 'wave', h: 46 });
+      T.line(128, 150, 134, 94, '#6e4422', 2); T.glow(134, 92, 12, 'rgba(160,220,255,.8)'); T.circ(134, 92, 3, '#e4f4ff');
+      if (ph === 'bolt') { T.line(134, 92, 320, 168, 'rgba(132,180,240,.6)', 9); T.line(134, 92, 320, 168, '#84b4f0', 5); T.line(134, 92, 320, 168, '#ffffff', 2); T.glow(134, 92, 22, 'rgba(200,230,255,.9)'); }
     }
-    if (ph === 'dave') { P.jon(80, 160, { arms: 'hips' }); P.dave(230, 170, { arms: 'up', h: 56 }); T.rect(250, 4, 60, 70, 'rgba(255,255,255,.3)'); for (let i = 0; i < 6; i++) T.line(280, 40, 260 + rnd() * 60, 10 + rnd() * 70, '#ffffff', 1); }
-    if (ph === 'grab') { P.jon(110, 160, { arms: 'up' }); P.yeast(130, 112, .4, true); T.rect(116, 140, 30, 20, '#3c3a38'); T.glow(131, 140, 18, 'rgba(255,140,60,.8)'); for (let i = 0; i < 5; i++) T.rect(118 + i * 6, 136, 4, 4, '#f8d040'); }
-    if (ph === 'stone') { P.katSit(250, 170, .62); P.taz(214, 168, { h: 36, arms: 'hips' }); P.yeast(110, 166, .35, true); T.rect(80, 150, 12, 3, '#dc4c30'); }
-    T.light('rgba(255,255,255,.06)', 'rgba(40,60,120,.12)');
+    if (ph === 'dave') { P.jon(78, 160, { arms: 'hips', h: 46 }); P.dave(236, 172, { arms: 'up', h: 48 }); T.outlined(() => { T.line(262, 110, 270, 86, '#6e4422', 2.5); T.poly([[264, 90], [280, 84], [278, 100], [268, 98]], '#d0c8ba'); }); }
+    if (ph === 'grab') { T.outlined(() => { T.poly([[112, 160], [146, 160], [142, 140], [116, 140]], '#3c3a38'); T.rect(110, 136, 38, 5, '#6c6862'); }); T.glow(129, 136, 22, 'rgba(255,140,60,.85)'); for (let i = 0; i < 6; i++) T.poly([[114 + i * 5, 137], [116.5 + i * 5, 128 - rnd() * 6], [119 + i * 5, 137]], i % 2 ? '#f08c34' : '#f8d040'); P.jon(92, 160, { arms: 'up', h: 46 }); P.yeast(124, 110, .42, true); }
+    if (ph === 'stone') { P.katSit(256, 172, .7); P.taz(212, 170, { h: 32, arms: 'hips' }); P.yeast(104, 168, .4, true); T.rect(70, 152, 14, 3, '#dc4c30'); T.rect(84, 151, 4, 2, '#dc4c30'); }
+    T.light('rgba(160,180,255,.06)', 'rgba(10,10,60,.2)');
   },
   hot: g => {
     const f = g.s.fight, ph = f ? f.phase : 'none';
-    return [ph === 'dave' ? [200, 90, 60, 84, 'dave', 'Dave the Viking'] : null, !g.f('jonEaten') ? (ph === 'dave' ? [60, 100, 40, 64, 'jon', 'Jon'] : [90, 100, 40, 64, 'jon', 'Jon of the Elven Ridge']) : null, [136, 74, 48, 66, 'stone', 'the Dry Stone'], [200, 86, 44, 56, 'yeast', 'the Mother Yeast']];
+    return [ph === 'dave' ? [204, 84, 70, 92, 'dave', 'Dave the Viking'] : null, !g.f('jonEaten') ? (ph === 'dave' ? [54, 80, 48, 84, 'jon', 'Jon'] : [78, 80, 52, 84, 'jon', 'Jon of the Elven Ridge']) : null, [136, 62, 48, 84, 'stone', 'the Dry Stone'], [200, 80, 46, 66, 'yeast', 'the Mother Yeast']];
   }
 };
 
