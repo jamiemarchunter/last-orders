@@ -3943,22 +3943,64 @@ function sfx(k) {
 GK.sfx = sfx;
 const NOTES = [262, 294, 330, 349, 392, 440, 494, 523];
 GK.ui.note = i => { if (soundMode && !GK.test) { tone(NOTES[i], 'triangle', .45, .14); tone(NOTES[i] * 2, 'sine', .3, .03); } };
-// a little looping pub tune, very quiet
-let musicTimer = null;
+/* Music: a different little tune for each chapter (and the ending). Each tune plays twice,
+   then there's a quiet break (about 12 seconds) before it comes round again, so it never drones on. */
+const NOTE = n => { const m = /^([A-G])(#?)(\d)$/.exec(n); if (!m) return 0; const k = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 }[m[1]] + (m[2] ? 1 : 0) + (+m[3] + 1) * 12; return 440 * Math.pow(2, (k - 69) / 12); };
+const TUNES = {
+  // I: a pub jig
+  1: { ms: 190, wave: 'square', bwave: 'triangle', vol: .011, rest: 63, bassEvery: 3,
+    mel: 'D5 - F#5 A5 - F#5 G5 - E5 F#5 - D5 E5 - C#5 D5 - - A4 - D5 F#5 - A5 B5 - A5 G5 - E5 F#5 E5 C#5 D5 - -',
+    bass: 'D3 A2 D3 G2 A2 D3 D3 A2 D3 G2 A2 D3' },
+  // II: the wild woods, slow and airy
+  2: { ms: 300, wave: 'triangle', bwave: 'sine', vol: .03, rest: 40, bassEvery: 4,
+    mel: 'A4 - C5 - D5 - E5 - - - G5 - E5 - D5 - C5 - - - D5 - C5 - A4 - - - - - - -',
+    bass: 'A2 E3 F2 G2 A2 E3 D3 E3' },
+  // III: a sea shanty
+  3: { ms: 210, wave: 'square', bwave: 'triangle', vol: .011, rest: 57, bassEvery: 3,
+    mel: 'A4 - D5 D5 - D5 C5 - D5 E5 - F5 D5 - - A4 - D5 D5 - D5 C5 - A4 G4 - F4 E4 - D4 D4 - -',
+    bass: 'D3 A2 C3 D3 D3 A2 C3 D3 D3 A2 C3 D3' },
+  // IV: dwarves at work under the mountain
+  4: { ms: 270, wave: 'sawtooth', bwave: 'square', vol: .007, rest: 44, bassEvery: 2,
+    mel: 'D4 - - D4 F4 - E4 - D4 - C4 - D4 - - - D4 - - D4 F4 - G4 - A4 - G4 - F4 - E4 -',
+    bass: 'D2 A2 D2 A2 C2 G2 D2 A2 D2 A2 D2 A2 C2 G2 A2 A2' },
+  // V: sneaking about below stairs
+  5: { ms: 250, wave: 'triangle', bwave: 'triangle', vol: .03, rest: 48, bassEvery: 4,
+    mel: 'E4 - G4 - B4 - - - A#4 - A4 - G4 - - - E4 - - G4 F#4 - - - E4 - - - - - - -',
+    bass: 'E2 B1 E2 B1 C2 B1 E2 E2' },
+  // VI: up the Tower of Temperance
+  6: { ms: 210, wave: 'square', bwave: 'triangle', vol: .01, rest: 57, bassEvery: 2,
+    mel: 'E5 - E5 F5 - E5 - D5 - C5 - B4 - - - A4 - A4 B4 - C5 - D5 - E5 - F5 - - - E5 - -',
+    bass: 'A2 A2 F2 F2 G2 G2 E2 E2 A2 A2 F2 F2 G2 G2 E2 E2' },
+  // the ending: back in the pub, louder and happier
+  end: { ms: 170, wave: 'square', bwave: 'triangle', vol: .013, rest: 12, bassEvery: 2,
+    mel: 'G4 B4 D5 G5 - D5 B4 D5 G5 - A5 B5 - A5 G5 - E5 - G5 - D5 - B4 - C5 - A4 - G4 - - -',
+    bass: 'G2 D3 G2 D3 C3 G2 D3 D3 G2 D3 G2 D3 C3 D3 G2 G2' }
+};
+Object.values(TUNES).forEach(t => { t.m = t.mel.split(' ').map(NOTE); t.b = t.bass.split(' ').map(NOTE); });
+const tuneKey = () => g.s.over ? 'end' : (g.s.started ? g.s.chapter : 1);
+let musicTimer = null, musicOn = false;
 function music(on) {
-  clearInterval(musicTimer); musicTimer = null;
+  clearTimeout(musicTimer); musicTimer = null; musicOn = !!on;
   if (!on || GK.test) return;
-  const a = actx(); if (!a) return;
-  const bass = [196, 196, 262, 262, 220, 220, 147, 196];
-  const mel = [392, 440, 494, 440, 392, 330, 294, 0, 330, 392, 440, 392, 330, 294, 262, 0];
-  let step = 0;
-  musicTimer = setInterval(() => {
-    if (soundMode < 2 || document.hidden) return;
-    if (step % 2 === 0) tone(bass[(step / 2 | 0) % 8], 'triangle', .4, .045);
-    const m = mel[step % 16]; if (m) tone(m, 'square', .16, .011);
+  if (!actx()) return;
+  let key = null, step = 0;
+  const tick = () => {
+    if (!musicOn) return;
+    const k = tuneKey(); if (k !== key) { key = k; step = 0; }
+    const t = TUNES[key] || TUNES[1];
+    if (soundMode === 2 && !document.hidden) {
+      const loop = t.m.length * 2, phase = step % (loop + t.rest);
+      if (phase < loop) {
+        const f = t.m[phase % t.m.length]; if (f) tone(f, t.wave, t.ms / 1000 * .75, t.vol);
+        if (phase % t.bassEvery === 0) { const b = t.b[(phase / t.bassEvery | 0) % t.b.length]; if (b) tone(b, t.bwave, t.ms / 1000 * t.bassEvery * .8, .045); }
+      }
+    }
     step++;
-  }, 240);
+    musicTimer = setTimeout(tick, t.ms);
+  };
+  tick();
 }
+GK.ui.tuneKey = tuneKey; GK.ui.TUNES = TUNES;
 function setSound(m) {
   soundMode = m; try { localStorage.setItem('lastorders-sound', m); } catch (e) {}
   const b = $('soundbtn'); b.dataset.mode = m; b.querySelector('.tip').textContent = ['Sound off', 'Sound effects', 'Sound + music'][m];
